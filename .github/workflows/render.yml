@@ -1,0 +1,53 @@
+name: Render Shorts
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Konu (ornek: How many Earths fit inside the Sun?)"
+        type: string
+        default: "How many Earths fit inside the Sun?"
+      preview:
+        description: "Sadece onizleme (6 kare, cok hizli)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Modal Kur
+        run: pip install modal
+
+      - name: Render
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TOPIC: ${{ inputs.topic }}
+          PREVIEW: ${{ inputs.preview }}
+        run: |
+          if [ "$PREVIEW" = "true" ]; then
+            modal run modal_render.py --topic "$TOPIC" --preview
+          else
+            modal run modal_render.py --topic "$TOPIC"
+          fi
+
+      - name: Çıktıyı Telefona Yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: shorts-render-output
+          path: |
+            *.mp4
+            *.png
+            *.jpg
+          if-no-files-found: warn
