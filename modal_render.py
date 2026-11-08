@@ -1,155 +1,275 @@
+import subprocess
 import modal
-import os
 
 app = modal.App("shorts-blender-engine")
 
-# Sanal ekran (xvfb) ve OpenGL sürücüleri eklenmiş imaj
+BLENDER_URL = "https://download.blender.org/release/Blender3.6/blender-3.6.18-linux-x64.tar.xz"
+
 image = (
-    modal.Image.debian_slim()
+    modal.Image.debian_slim(python_version="3.11")
     .apt_install(
-        "wget", "xz-utils", "ffmpeg", "xvfb",
-        "libxrender1", "libxi6", "libgl1", "libxkbcommon-x11-0",
-        "libsm6", "libgl1-mesa-glx", "libgl1-mesa-dri"
+        "wget", "xz-utils", "ffmpeg",
+        # Blender'in headless modda bile link ettigi kutuphaneler
+        "libgl1", "libegl1", "libxrender1", "libxi6", "libxxf86vm1",
+        "libxfixes3", "libxext6", "libx11-6", "libxkbcommon0",
+        "libsm6", "libice6",
     )
     .run_commands(
-        "wget -q -c https://download.blender.org/release/Blender3.6/blender-3.6.18-linux-x64.tar.xz",
-        "tar -xf blender-3.6.18-linux-x64.tar.xz -C /opt",
+        f"wget -q {BLENDER_URL} -O /tmp/blender.tar.xz",
+        "tar -xf /tmp/blender.tar.xz -C /opt",
         "ln -sf /opt/blender-3.6.18-linux-x64/blender /usr/local/bin/blender",
-        "rm blender-3.6.18-linux-x64.tar.xz"
+        "rm /tmp/blender.tar.xz",
     )
 )
 
-@app.function(
-    gpu="T4",
-    timeout=300,
-    image=image
-)
-def render_scene():
-    import subprocess, glob
+# ---------------------------------------------------------------------------
+# Blender icinde calisacak sahne scripti (bpy)
+# ---------------------------------------------------------------------------
+BLENDER_SCRIPT = r'''
+import bpy, bmesh, math, random, os
 
-    blender_script = """
-import bpy, math, random
+random.seed(7)
+
+W, H = 1080, 1920
+FPS = 30
+SECONDS = 9
+N_BALLS = 40
+BALL_R = 0.35
+BOWL_R = 2.0
+OUT = "/tmp/frames/f_"
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 scene = bpy.context.scene
-
-# Çözünürlük & 5 saniyelik dökülme (150 kare)
-scene.render.resolution_x = 1080
-scene.render.resolution_y = 1920
-scene.render.fps = 30
 scene.frame_start = 1
-scene.frame_end = 150
+scene.frame_end = FPS * SECONDS
+scene.render.fps = FPS
 
-# EEVEE Motoru
-scene.render.engine = 'BLENDER_EEVEE'
-scene.eevee.use_gtao = True
-scene.eevee.use_bloom = True
-scene.eevee.use_ssr = True
+# ---------------- Dunya ----------------
+world = bpy.data.worlds.new("World")
+scene.world = world
+world.use_nodes = True
+bg = world.node_tree.nodes["Background"]
+bg.inputs[0].default_value = (0.005, 0.006, 0.02, 1)
+bg.inputs[1].default_value = 1.0
 
-# Kamera Kurulumu
-cam_data = bpy.data.cameras.new("MainCam")
-cam_data.lens = 45
-cam_obj = bpy.data.objects.new("MainCam", cam_data)
-scene.collection.objects.link(cam_obj)
-scene.camera = cam_obj
-cam_obj.location = (0, -26, 9)
-cam_obj.rotation_euler = (math.radians(72), 0, 0)
-
-# Işık
-l1 = bpy.data.lights.new("Sun", 'SUN')
-l1.energy = 4.5
-o1 = bpy.data.objects.new("Sun", l1)
-scene.collection.objects.link(o1)
-o1.rotation_euler = (math.radians(50), math.radians(-25), 0)
-
-# Çanak (Güneş Kabı)
-bpy.ops.mesh.primitive_uv_sphere_add(radius=5.0, location=(0, 0, -2.5))
+# ---------------- Cam kase (ustu kesik, kalin cidarli) ----------------
+bpy.ops.mesh.primitive_uv_sphere_add(radius=BOWL_R, segments=48, ring_count=32, location=(0, 0, 0))
 bowl = bpy.context.active_object
-bowl.name = "SunBowl"
+bowl.name = "Bowl"
+bm = bmesh.new()
+bm.from_mesh(bowl.data)
+cut = [v for v in bm.verts if v.co.z > 0.6]
+bmesh.ops.delete(bm, geom=cut, context="VERTS")
+bm.to_mesh(bowl.data)
+bm.free()
+for p in bowl.data.polygons:
+    p.use_smooth = True
 
-bpy.ops.mesh.primitive_cube_add(size=14, location=(0, 0, 4.0))
-cutter = bpy.context.active_object
-mod = bowl.modifiers.new("Cut", 'BOOLEAN')
-mod.object = cutter
-mod.operation = 'DIFFERENCE'
+mod = bowl.modifiers.new("Solidify", "SOLIDIFY")
+mod.thickness = 0.12
+mod.offset = -1
 bpy.context.view_layer.objects.active = bowl
-bpy.ops.object.modifier_apply(modifier="Cut")
-bpy.data.objects.remove(cutter, do_unlink=True)
+bowl.select_set(True)
+bpy.ops.object.modifier_apply(modifier="Solidify")
 
-sol = bowl.modifiers.new("Thickness", 'SOLIDIFY')
-sol.thickness = 0.35
-bpy.ops.object.modifier_apply(modifier="Thickness")
-
-mat_bowl = bpy.data.materials.new("GlassSun")
-mat_bowl.use_nodes = True
-mat_bowl.blend_method = 'BLEND'
-bsdf_bowl = mat_bowl.node_tree.nodes.get("Principled BSDF")
-bsdf_bowl.inputs['Base Color'].default_value = (1.0, 0.55, 0.1, 1.0)
-bsdf_bowl.inputs['Transmission Weight'].default_value = 0.85
-bsdf_bowl.inputs['Roughness'].default_value = 0.08
-bsdf_bowl.inputs['Emission Color'].default_value = (1.0, 0.3, 0.0, 1.0)
-bsdf_bowl.inputs['Emission Strength'].default_value = 1.0
-bowl.data.materials.append(mat_bowl)
+mat = bpy.data.materials.new("HotGlass")
+mat.use_nodes = True
+b = mat.node_tree.nodes["Principled BSDF"]
+b.inputs["Base Color"].default_value = (1.0, 0.35, 0.05, 1)
+b.inputs["Roughness"].default_value = 0.05
+b.inputs["IOR"].default_value = 1.45
+b.inputs["Transmission"].default_value = 1.0
+b.inputs["Emission"].default_value = (1.0, 0.4, 0.05, 1)
+b.inputs["Emission Strength"].default_value = 2.5
+bowl.data.materials.append(mat)
+bowl.visible_shadow = False
 
 bpy.ops.rigidbody.object_add()
-bowl.rigid_body.type = 'PASSIVE'
-bowl.rigid_body.collision_shape = 'MESH'
+bowl.rigid_body.type = "PASSIVE"
+bowl.rigid_body.collision_shape = "MESH"
+bowl.rigid_body.friction = 0.5
+bowl.rigid_body.restitution = 0.3
+bowl.rigid_body.collision_margin = 0.001
 
-# Küreler (Dünyalar)
-mat_ball = bpy.data.materials.new("EarthMat")
-mat_ball.use_nodes = True
-bsdf_ball = mat_ball.node_tree.nodes.get("Principled BSDF")
-bsdf_ball.inputs['Base Color'].default_value = (0.05, 0.42, 0.95, 1.0)
-bsdf_ball.inputs['Roughness'].default_value = 0.15
+# ---------------- Kureler ----------------
+ball_mat = bpy.data.materials.new("Planet")
+ball_mat.use_nodes = True
+nt = ball_mat.node_tree
+bsdf = nt.nodes["Principled BSDF"]
+bsdf.inputs["Roughness"].default_value = 0.35
+noise = nt.nodes.new("ShaderNodeTexNoise")
+noise.inputs["Scale"].default_value = 3.0
+noise.inputs["Detail"].default_value = 8.0
+ramp = nt.nodes.new("ShaderNodeValToRGB")
+ramp.color_ramp.elements[0].position = 0.0
+ramp.color_ramp.elements[0].color = (0.02, 0.08, 0.45, 1)
+e1 = ramp.color_ramp.elements.new(0.48)
+e1.color = (0.05, 0.25, 0.7, 1)
+e2 = ramp.color_ramp.elements.new(0.55)
+e2.color = (0.1, 0.45, 0.12, 1)
+ramp.color_ramp.elements[-1].position = 1.0
+ramp.color_ramp.elements[-1].color = (0.6, 0.5, 0.3, 1)
+nt.links.new(noise.outputs["Fac"], ramp.inputs["Fac"])
+nt.links.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
 
-random.seed(42)
-for i in range(40):
-    rx = random.uniform(-1.5, 1.5)
-    ry = random.uniform(-1.5, 1.5)
-    rz = 2.5 + (i * 0.6)
-    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.60, location=(rx, ry, rz))
-    ball = bpy.context.active_object
-    ball.data.materials.append(mat_ball)
+bpy.ops.mesh.primitive_uv_sphere_add(radius=BALL_R, segments=32, ring_count=16, location=(0, 0, 100))
+proto = bpy.context.active_object
+ball_mesh = proto.data
+for p in ball_mesh.polygons:
+    p.use_smooth = True
+ball_mesh.materials.append(ball_mat)
+bpy.data.objects.remove(proto)
+
+coll = scene.collection
+for i in range(N_BALLS):
+    ang = random.uniform(0, math.tau)
+    rad = random.uniform(0, 0.7)
+    obj = bpy.data.objects.new("Ball%d" % i, ball_mesh)
+    obj.location = (math.cos(ang) * rad, math.sin(ang) * rad, 3.5 + i * 0.85)
+    obj.rotation_euler = (random.uniform(0, 3), random.uniform(0, 3), random.uniform(0, 3))
+    coll.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
     bpy.ops.rigidbody.object_add()
-    ball.rigid_body.type = 'ACTIVE'
-    ball.rigid_body.collision_shape = 'SPHERE'
-    ball.rigid_body.mass = 3.0
-    ball.rigid_body.restitution = 0.25
+    obj.rigid_body.type = "ACTIVE"
+    obj.rigid_body.collision_shape = "SPHERE"
+    obj.rigid_body.mass = 1.0
+    obj.rigid_body.friction = 0.4
+    obj.rigid_body.restitution = 0.35
+    obj.select_set(False)
 
-# Çıktı formatı
-scene.render.image_settings.file_format = 'FFMPEG'
-scene.render.ffmpeg.format = 'MPEG4'
-scene.render.ffmpeg.codec = 'H264'
-scene.render.filepath = '/tmp/render_'
-scene.render.use_file_extension = True
+rbw = scene.rigidbody_world
+rbw.substeps_per_frame = 20
+rbw.solver_iterations = 20
+rbw.time_scale = 0.8
+rbw.point_cache.frame_start = 1
+rbw.point_cache.frame_end = FPS * SECONDS
 
-print("Render basliyor...")
+# ---------------- Kamera (dikey 9:16) ----------------
+cam_data = bpy.data.cameras.new("Cam")
+cam_data.lens = 35
+cam = bpy.data.objects.new("Cam", cam_data)
+coll.objects.link(cam)
+cam.location = (0, -14, 3)
+target = bpy.data.objects.new("Target", None)
+target.location = (0, 0, 3)
+coll.objects.link(target)
+tc = cam.constraints.new("TRACK_TO")
+tc.target = target
+tc.track_axis = "TRACK_NEGATIVE_Z"
+tc.up_axis = "UP_Y"
+scene.camera = cam
+# yavas yaklasma
+cam.keyframe_insert("location", frame=1)
+cam.location = (0, -12, 3)
+cam.keyframe_insert("location", frame=FPS * SECONDS)
+
+# ---------------- Isiklar ----------------
+ld = bpy.data.lights.new("Key", "AREA")
+ld.energy = 3000
+ld.size = 8
+key = bpy.data.objects.new("Key", ld)
+key.location = (0, -8, 8)
+key.rotation_euler = (math.radians(55), 0, 0)
+coll.objects.link(key)
+
+rd = bpy.data.lights.new("Rim", "POINT")
+rd.energy = 2000
+rim = bpy.data.objects.new("Rim", rd)
+rim.location = (4, 3, 5)
+coll.objects.link(rim)
+
+# ---------------- Render ayarlari ----------------
+scene.render.engine = "CYCLES"
+scene.render.resolution_x = W
+scene.render.resolution_y = H
+scene.render.resolution_percentage = 100
+scene.render.image_settings.file_format = "PNG"
+scene.render.filepath = OUT
+scene.render.use_persistent_data = True
+
+cy = scene.cycles
+cy.samples = 32
+cy.use_adaptive_sampling = True
+cy.use_denoising = True
+cy.denoiser = "OPENIMAGEDENOISE"
+cy.max_bounces = 6
+cy.diffuse_bounces = 2
+cy.glossy_bounces = 4
+cy.transmission_bounces = 6
+cy.transparent_max_bounces = 4
+cy.caustics_reflective = False
+cy.caustics_refractive = False
+cy.sample_clamp_indirect = 5.0
+
+# GPU (CUDA) sec
+try:
+    prefs = bpy.context.preferences.addons["cycles"].preferences
+    prefs.compute_device_type = "CUDA"
+    prefs.get_devices()
+    gpu_found = False
+    for d in prefs.devices:
+        d.use = (d.type != "CPU")
+        gpu_found = gpu_found or d.use
+        print("DEVICE:", d.name, d.type, d.use)
+    cy.device = "GPU" if gpu_found else "CPU"
+except Exception as ex:
+    print("GPU ayari basarisiz, CPU:", ex)
+    cy.device = "CPU"
+print("CYCLES DEVICE:", cy.device)
+
+# Hafif parlama (bloom benzeri)
+scene.use_nodes = True
+tree = scene.node_tree
+for n in list(tree.nodes):
+    tree.nodes.remove(n)
+rl = tree.nodes.new("CompositorNodeRLayers")
+glare = tree.nodes.new("CompositorNodeGlare")
+glare.glare_type = "FOG_GLOW"
+glare.threshold = 1.0
+glare.quality = "MEDIUM"
+glare.size = 7
+comp = tree.nodes.new("CompositorNodeComposite")
+tree.links.new(rl.outputs["Image"], glare.inputs["Image"])
+tree.links.new(glare.outputs["Image"], comp.inputs["Image"])
+
+os.makedirs("/tmp/frames", exist_ok=True)
 bpy.ops.render.render(animation=True)
-print("Render tamamlandi.")
-"""
+print("RENDER BITTI")
+'''
 
+
+@app.function(gpu="T4", timeout=1500, image=image)
+def render_scene() -> bytes:
     with open("/tmp/scene.py", "w") as f:
-        f.write(blender_script)
+        f.write(BLENDER_SCRIPT)
 
-    # xvfb ile sanal ekran kurarak EEVEE'nin OpenGL hatası vermesini engelliyoruz
-    cmd = ["xvfb-run", "-a", "blender", "-b", "-P", "/tmp/scene.py"]
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    print(res.stdout)
+    r = subprocess.run(
+        ["blender", "-b", "-noaudio", "-P", "/tmp/scene.py"],
+        capture_output=True, text=True,
+    )
+    print(r.stdout[-4000:])
+    if r.returncode != 0:
+        print(r.stderr[-4000:])
+        raise RuntimeError("Blender hata verdi, loglara bak.")
 
-    if res.returncode != 0:
-        raise RuntimeError(f"Blender patladi, cikis kodu: {res.returncode}")
+    enc = subprocess.run(
+        ["ffmpeg", "-y", "-framerate", "30", "-i", "/tmp/frames/f_%04d.png",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+         "-preset", "medium", "-movflags", "+faststart", "/tmp/out.mp4"],
+        capture_output=True, text=True,
+    )
+    if enc.returncode != 0:
+        print(enc.stderr[-3000:])
+        raise RuntimeError("ffmpeg hata verdi.")
 
-    # Üretilen MP4 dosyasını yakala
-    files = glob.glob("/tmp/render_*.mp4")
-    if not files:
-        raise FileNotFoundError(f"Video bulunamadi! /tmp dizini: {os.listdir('/tmp')}")
-
-    with open(files[0], "rb") as f:
+    with open("/tmp/out.mp4", "rb") as f:
         return f.read()
+
 
 @app.local_entrypoint()
 def main():
-    video_bytes = render_scene.remote()
+    data = render_scene.remote()
     with open("final_gpu_render.mp4", "wb") as f:
-        f.write(video_bytes)
-    print("Islem basarili: final_gpu_render.mp4 olusturuldu.")
+        f.write(data)
+    print("Kaydedildi: final_gpu_render.mp4 (%d KB)" % (len(data) // 1024))
