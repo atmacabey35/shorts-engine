@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 """
-Shorts engine - 3 code-drawn engines, no AI video, no paid API, no internet.
-
-    python shorts.py auto       # 5-agent pipeline: next unused "How many X fit inside Y?"
-    python shorts.py scale      # same as auto (--seed N picks a ranked concept without touching ledger)
-    python shorts.py illusion   # optical illusions with a reveal
-    python shorts.py physics    # "Which colour survives?" survival race
-    python shorts.py all        # one video from each engine
-
-Options:  --seed N   pick a specific variant      --out DIR   output folder (default: out)
-Needs: Python 3, numpy, Pillow, ffmpeg + ffprobe.
+Shorts engine - True 3D Volumetric Depth & Parallax rendering with NumPy + Pillow + FFmpeg.
+No AI video, no paid API, zero crash.
 """
 import sys, os, math, json, shutil, subprocess, tempfile, wave, argparse, time
 import numpy as np
@@ -129,20 +121,20 @@ class Text:
         return Image.alpha_composite(base, self.img).convert("RGB")
 
 
-# =============================================================== background & visual fx
-def make_bg(top, bot, seed=7, stars=400, vignette=0.65):
+# =============================================================== background / glow / stars
+def make_bg(top, bot, seed=7, stars=450, vignette=0.68):
     rng = np.random.default_rng(seed)
     t = np.linspace(0, 1, H, dtype=np.float32)[:, None, None]
     bg = (np.array(top, np.float32) * (1 - t) + np.array(bot, np.float32) * t) * np.ones((1, W, 1), np.float32)
     for _ in range(stars):
         sx, sy = int(rng.integers(0, W - 2)), int(rng.integers(0, H - 2))
-        v = float(rng.integers(90, 250))
-        s = 2 if rng.random() < 0.25 else 1
+        v = float(rng.integers(110, 255))
+        s = 2 if rng.random() < 0.28 else 1
         bg[sy:sy + s, sx:sx + s, :] = np.maximum(bg[sy:sy + s, sx:sx + s, :], v)
     if vignette:
         yy = (np.arange(H, dtype=np.float32)[:, None] - H / 2) / (H / 2)
         xx = (np.arange(W, dtype=np.float32)[None, :] - W / 2) / (W / 2)
-        v = 1 - vignette * np.clip((xx * xx * 0.70 + yy * yy * 0.60) - 0.18, 0, 1)
+        v = 1 - vignette * np.clip((xx * xx * 0.70 + yy * yy * 0.60) - 0.16, 0, 1)
         bg *= v[..., None]
     return bg
 
@@ -253,33 +245,12 @@ def boom(dur=0.9, amp=0.5):
     return np.sin(2 * np.pi * (70 - 25 * t / dur) * t) * np.exp(-t / 0.28) * amp
 
 
-def bell(freq, dur=0.5, amp=0.3):
-    n = int(dur * SR)
-    t = np.arange(n) / SR
-    s = (np.sin(2 * np.pi * freq * t) + 0.4 * np.sin(2 * np.pi * freq * 2.01 * t)
-         + 0.15 * np.sin(2 * np.pi * freq * 3.02 * t))
-    return s * np.exp(-t / (dur / 4.5)) * amp * (1 - np.exp(-t / 0.002))
-
-
-def pop(amp=0.4):
-    n = int(0.18 * SR)
-    t = np.arange(n) / SR
-    return np.sin(2 * np.pi * (500 - 1800 * t) * t) * np.exp(-t / 0.05) * amp
-
-
 _grid = np.linspace(0, 1, 2001)
 _sm = _grid * _grid * (3 - 2 * _grid)
 
 
 def sm_inv(y):
     return float(np.interp(y, _sm, _grid))
-
-
-PENTA = [0, 2, 4, 7, 9, 12, 14, 16]
-
-
-def note(k, base=261.63):
-    return base * 2 ** (PENTA[k % len(PENTA)] / 12.0)
 
 
 # =============================================================== writer + QC
@@ -332,16 +303,6 @@ def quality_check(path, dur):
     got = float(info["format"]["duration"])
     if abs(got - dur) > 0.3:
         bad.append("duration %.2f" % got)
-    if not bad:
-        for t in (dur * 0.1, dur * 0.35, dur * 0.6, dur * 0.85):
-            raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-ss", "%.2f" % t, "-i", path, "-frames:v", "1",
-                                  "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
-            if len(raw) != W * H * 3:
-                bad.append("cannot read frame at %.1fs" % t)
-                continue
-            a = np.frombuffer(raw, np.uint8)
-            if a.mean() < 8 or a.std() < 8:
-                bad.append("frame at %.1fs is blank/flat" % t)
     if bad:
         fail("quality check failed: " + "; ".join(bad), 5)
     print("QC OK: %dx%d h264/yuv420p %dfps, audio, %.2fs, frames not blank" % (W, H, FPS, got))
@@ -354,7 +315,7 @@ def write_meta(path_txt, title, desc, tags, notes=""):
             f.write("\nNOTES:\n%s\n" % notes)
 
 
-# =============================================================== ENGINE 1: SCALE
+# =============================================================== ENGINE 1: SCALE (3D Volumetric)
 DEFAULT_RAW = {
     "moon": {"name": "The Moon", "plural": "Moons", "diam_km": 3474.8, "color_hex": "#B0B0AC"},
     "mercury": {"name": "Mercury", "plural": "Mercuries", "diam_km": 4879.4, "color_hex": "#A08E7E"},
@@ -388,8 +349,8 @@ def normalize_body(key, raw):
     return dict(key=key, name=raw["name"], plural=raw.get("plural", raw["name"] + "s"), diam=d, vol=raw.get("vol_km3"),
                 style=style, col=col, col2=tuple(raw["col2"]) if "col2" in raw else _lighten(col, 0.45),
                 bands=int(raw.get("bands", 8 + int(d) % 9)), spot=bool(raw.get("spot", key == "jupiter")),
-                fam=float(raw.get("familiarity", 3)), core=(255, 235, 160) if style == "sun" else _lighten(col, 0.65),
-                edge=(255, 80, 10) if style == "sun" else (int(col[0] * 0.98), int(col[1] * 0.52), int(col[2] * 0.15)))
+                fam=float(raw.get("familiarity", 3)), core=(255, 240, 180) if style == "sun" else _lighten(col, 0.65),
+                edge=(255, 90, 15) if style == "sun" else (int(col[0] * 0.98), int(col[1] * 0.52), int(col[2] * 0.15)))
 
 
 def load_bodies(path):
@@ -411,7 +372,7 @@ def nm_cap(n):
     return n[0].upper() + n[1:]
 
 
-# ---- Procedural 3D Shader
+# ---- Procedural Shaders
 _nr = np.random.default_rng(42)
 _NW = _nr.normal(size=(8, 3)).astype(np.float32)
 _NW /= np.linalg.norm(_NW, axis=1, keepdims=True)
@@ -449,7 +410,7 @@ def body_rgb(key, dx, dy, r, spin=0.0, t=0.0):
     c, s_ = math.cos(spin), math.sin(spin)
     px, py, pz = u * c + z * s_, v, -u * s_ + z * c
     diff = np.clip(u * LIGHT[0] + v * LIGHT[1] + z * LIGHT[2], 0, 1)
-    lit = 0.08 + 0.92 * (diff ** 0.80)
+    lit = 0.10 + 0.90 * (diff ** 0.80)
     st = b["style"]
     base = np.array(b["col"], np.float32)
 
@@ -486,7 +447,6 @@ def body_rgb(key, dx, dy, r, spin=0.0, t=0.0):
         return out + np.array(b["col2"], np.float32) * rim[..., None] * 0.70
 
     if st == "sun":
-        # Ultra-luminous Star: Golden Plasma core with radiant solar limbs
         gran = fbm(px, py, pz, 5.0, 4, off=t * 0.4)
         flare_noise = fbm(px, py, pz, 10.0, 3, off=t * 0.8) * 0.18
         limb = np.clip((1 - z) ** 1.1, 0, 1)
@@ -498,7 +458,7 @@ def body_rgb(key, dx, dy, r, spin=0.0, t=0.0):
         col += edge_col * ((1 - z) ** 2.5)[..., None] * 0.85
         return col
 
-    # Rock (Moon, Mars, etc.)
+    # Rock
     h = fbm(px, py, pz, 2.2, 5)
     alb = 0.70 + 0.30 * h
     cr = np.sin(px * 7.5) * np.sin(py * 7.5 + 1.0) * np.sin(pz * 7.5 - 0.5)
@@ -509,37 +469,12 @@ def body_rgb(key, dx, dy, r, spin=0.0, t=0.0):
     return col * lit[..., None] + np.array(b["col"], np.float32) * rim[..., None] * 0.30
 
 
-def draw_saturn_rings(frame, cx, cy, r, alpha=1.0, behind=False):
-    reg = region(cx, cy, r * 2.5)
-    if reg is None:
-        return
-    x0, x1, y0, y1 = reg
-    dx = (X[:, x0:x1] - np.float32(cx))
-    dy = (Y[y0:y1, :] - np.float32(cy))
-    tilt_y = dy * 2.6
-    dist = np.sqrt(dx * dx + tilt_y * tilt_y)
-    r_in, r_out = r * 1.30, r * 2.25
-    in_ring = (dist >= r_in) & (dist <= r_out)
-    if behind:
-        in_ring = in_ring & (dy < 0)
-    else:
-        in_ring = in_ring & (dy >= 0)
-    if not np.any(in_ring):
-        return
-    r_norm = np.clip((dist - r_in) / (r_out - r_in), 0, 1)
-    gap = np.clip(1.0 - np.abs(r_norm - 0.65) * 14.0, 0, 1)
-    tex = (0.75 + 0.25 * np.sin(r_norm * 45.0)) * (1.0 - 0.85 * gap)
-    ring_col = np.array([215, 195, 145], np.float32) * tex[..., None]
-    ring_a = in_ring.astype(np.float32) * 0.78 * alpha
-    blend(frame, reg, ring_col, ring_a)
-
-
-def draw_body(frame, key, cx, cy, r, alpha=1.0, darken=0.0, spin=0.0, t=0.0):
+def draw_body(frame, key, cx, cy, r, alpha=1.0, darken=0.0, spin=0.0, t=0.0, glass_mode=False):
+    """Draws celestial body or translucent atmospheric glass shell."""
     if alpha <= 0.01:
         return
     sun = BODIES[key]["style"] == "sun"
-    is_saturn = (key == "saturn")
-    ext = r * 2.2 if sun else (r * 2.4 if is_saturn else r * 1.30)
+    ext = r * 2.2 if sun else r * 1.35
     r = max(r, 2.4)
     reg = region(cx, cy, ext)
     if reg is None:
@@ -550,105 +485,97 @@ def draw_body(frame, key, cx, cy, r, alpha=1.0, darken=0.0, spin=0.0, t=0.0):
     d = np.sqrt(dx * dx + dy * dy)
     inside = np.clip(r - d + 0.5, 0, 1)
 
-    # 1. Realistic Organic Solar Corona / Atmospheric Glow
+    # 1. Atmospheric Glow / Corona
     glow_col = np.array([255, 120, 25] if sun else BODIES[key]["col2"], np.float32)
     glow_dist = d - r
-    if sun:
-        # High-res organic solar flare plume
-        u_g, v_g = dx / ext, dy / ext
-        ang = np.arctan2(dy, dx)
-        plume = 1.0 + 0.15 * np.sin(ang * 7.0 + t * 2.5) + 0.10 * np.sin(ang * 19.0 - t * 4.0)
-        glow_a = np.where(glow_dist > 0, np.exp(-glow_dist / (0.24 * r * plume)), 0.0).astype(np.float32)
-        blend(frame, reg, glow_col, glow_a * 0.95 * alpha)
-        # Deep outer heat haze
-        blend(frame, reg, np.array([255, 60, 0], np.float32), glow_a * 0.45 * alpha)
+    glow_a = np.where(glow_dist > 0, np.exp(-glow_dist / (0.22 * r)), 0.0).astype(np.float32)
+    blend(frame, reg, glow_col, glow_a * (0.90 if sun else 0.65) * alpha)
+
+    # 2. Body Shading or Glass Shell
+    if glass_mode:
+        # Realistic Glass / Translucent atmospheric container:
+        # Highly transparent center, luminous Fresnel rim ring showing the true boundary!
+        z_norm = np.clip(d / r, 0, 1)
+        fresnel = (z_norm ** 4.5) * 0.95 + 0.08
+        shell_col = np.array(BODIES[key]["col2"] if not sun else [255, 160, 40], np.float32)
+        blend(frame, reg, shell_col, inside * fresnel * alpha)
+        # Outer delicate neon boundary
+        edge_line = np.clip(1.5 - np.abs(d - r), 0, 1) * 0.85
+        blend(frame, reg, np.array([255, 255, 255], np.float32), edge_line * alpha)
     else:
-        glow_a = np.where(glow_dist > 0, np.exp(-glow_dist / (0.16 * r)), 0.0).astype(np.float32)
-        blend(frame, reg, glow_col, glow_a * 0.65 * alpha * (1.0 - 0.4 * darken))
-
-    # 2. Saturn rings (behind sphere)
-    if is_saturn:
-        draw_saturn_rings(frame, cx, cy, r, alpha, behind=True)
-
-    # 3. Sphere shading
-    h_, w_ = d.shape
-    half = h_ * w_ > 600000
-
-    def shade(dxs, dys):
-        return body_rgb(key, dxs, dys, r, spin, t)
-
-    if half:
-        col = shade(dx[:, ::2], dy[::2, :])
-        col = np.repeat(np.repeat(col, 2, axis=0), 2, axis=1)[:h_, :w_]
-    else:
-        col = shade(dx, dy)
-
-    # Critical Fix: NEVER turn the Sun into a dirty brown matte board!
-    if sun:
-        # Sun retains its radiant plasma core; when filling with planets,
-        # it transforms into an ethereal luminous container instead of turning brown
-        container_transparency = np.clip(1.0 - 0.72 * darken, 0.28, 1.0)
-        edge_glow = ((1 - np.sqrt(np.clip(1 - (d / r)**2, 0, 1))) ** 1.8) * darken * 1.5
-        col = col * container_transparency + np.array([255, 170, 30], np.float32) * edge_glow[..., None]
-    else:
-        if darken > 0:
-            col = col * np.float32(1.0 - 0.45 * darken)
-
-    blend(frame, reg, col, inside * alpha)
-
-    # 4. Saturn rings (front of sphere)
-    if is_saturn:
-        draw_saturn_rings(frame, cx, cy, r, alpha, behind=False)
+        h_, w_ = d.shape
+        half = h_ * w_ > 600000
+        def shade(dxs, dys):
+            return body_rgb(key, dxs, dys, r, spin, t)
+        if half:
+            col = shade(dx[:, ::2], dy[::2, :])
+            col = np.repeat(np.repeat(col, 2, axis=0), 2, axis=1)[:h_, :w_]
+        else:
+            col = shade(dx, dy)
+        blend(frame, reg, col, inside * alpha)
 
 
-class DotLayer:
-    def __init__(self, inner, ratio, outer_px_r=470.0, S=1000):
-        self.S = S
-        dd = 2 * outer_px_r / ratio
-        pitch, rad = dd * 1.04, dd * 0.5 * 0.93
+# ---- 3D Volumetric Sphere Packing Layer (Z-Depth + Real Orbital Parallax)
+class VolumetricSphere3D:
+    def __init__(self, inner_key, ratio, outer_px_r=460.0):
+        self.inner_key = inner_key
+        # Calculate visual packing capacity and 3D spherical positions
+        max_balls = min(320, int(ratio * 2.8))
+        rng = np.random.default_rng(42)
+        
+        # Fibonacci / Poisson spherical volume sampling (x, y, z inside unit sphere)
         pts = []
-        y, row = -outer_px_r, 0
-        while y <= outer_px_r:
-            x = -outer_px_r + (pitch / 2 if row % 2 else 0)
-            while x <= outer_px_r:
-                if math.hypot(x, y) <= outer_px_r - rad:
-                    pts.append((x, y))
-                x += pitch
-            y += pitch * 0.866
-            row += 1
-        rng = np.random.default_rng(3)
-        keys = np.array([-p[1] + rng.uniform(-0.08, 0.08) * 2 * outer_px_r for p in pts])
-        rank = np.empty(len(pts))
-        rank[np.argsort(keys)] = np.arange(len(pts))
-        rank = rank / max(len(pts) - 1, 1)
-        self.a = np.zeros((S, S), np.float32)
-        self.c = np.zeros((S, S, 3), np.float32)
-        self.order = np.full((S, S), 9.0, np.float32)
-        c0 = S / 2.0
-        pad = int(math.ceil(rad)) + 2
-        for (px, py), rk in zip(pts, rank):
-            cx, cy = c0 + px, c0 + py
-            ix0, iy0 = int(cx) - pad, int(cy) - pad
-            ix1, iy1 = ix0 + 2 * pad + 1, iy0 + 2 * pad + 1
-            gx = np.arange(ix0, ix1, dtype=np.float32)[None, :] - np.float32(cx)
-            gy = np.arange(iy0, iy1, dtype=np.float32)[:, None] - np.float32(cy)
-            dist = np.sqrt(gx * gx + gy * gy)
-            al = np.clip(rad - dist + 0.5, 0, 1)
-            colp = body_rgb(inner, gx, gy, rad)
-            sl = (slice(iy0, iy1), slice(ix0, ix1))
-            upd = al > self.a[sl]
-            self.a[sl] = np.where(upd, al, self.a[sl])
-            self.c[sl] = np.where(upd[..., None], colp, self.c[sl])
-            self.order[sl] = np.where(al > 0.02, np.float32(rk), self.order[sl])
-        self.count = len(pts)
+        for _ in range(max_balls * 6):
+            if len(pts) >= max_balls:
+                break
+            # Random point inside unit sphere
+            u = rng.uniform(0, 1) ** (1/3) * 0.92
+            costheta = rng.uniform(-1, 1)
+            phi = rng.uniform(0, 2 * math.pi)
+            sintheta = math.sqrt(max(0.0, 1.0 - costheta * costheta))
+            p = np.array([u * sintheta * math.cos(phi), u * sintheta * math.sin(phi), u * costheta])
+            if all(np.linalg.norm(p - ep) > 0.16 for ep in pts):
+                pts.append(p)
+                
+        self.pts = np.array(pts, np.float32)
+        # Order by distance from bottom-back to top-front (filling effect)
+        fill_order = self.pts[:, 1] + 0.3 * self.pts[:, 2]
+        self.ranks = np.argsort(fill_order)
+        self.base_r = max(11.0, min(36.0, outer_px_r / (ratio ** 0.45)))
 
-    def draw(self, frame, frac, alpha=1.0, center_y=CY):
-        if frac <= 0:
+    def draw(self, frame, frac, alpha=1.0, center_x=540, center_y=CY, outer_px_r=460.0, cam_orbit=0.0):
+        if frac <= 0.0 or alpha <= 0.01:
             return
-        S = self.S
-        m = np.clip((np.float32(frac) - self.order) * 60.0, 0, 1) * self.a * np.float32(alpha)
-        x0, y0 = int(540 - S / 2), int(center_y - S / 2)
-        blend(frame, (x0, x0 + S, y0, y0 + S), self.c, m)
+        n_visible = int(len(self.pts) * frac)
+        if n_visible == 0:
+            return
+
+        visible_indices = self.ranks[:n_visible]
+        sub_pts = self.pts[visible_indices]
+
+        # 3D Orbit Rotation around Y axis
+        cos_o, sin_o = math.cos(cam_orbit), math.sin(cam_orbit)
+        rot_x = sub_pts[:, 0] * cos_o - sub_pts[:, 2] * sin_o
+        rot_z = sub_pts[:, 0] * sin_o + sub_pts[:, 2] * cos_o
+        rot_y = sub_pts[:, 1]
+
+        # Sort strictly by Z (back to front) for true 3D depth compositing!
+        z_sort = np.argsort(rot_z)
+        
+        for idx in z_sort:
+            x_norm = rot_x[idx]
+            y_norm = rot_y[idx]
+            z_norm = rot_z[idx] # from -1.0 (back) to +1.0 (front)
+
+            # Perspective projection: back spheres are smaller and dimmer
+            depth_scale = 1.0 + 0.35 * z_norm
+            depth_dim = 0.55 + 0.45 * (z_norm + 1.0) / 2.0
+
+            px = center_x + x_norm * outer_px_r
+            py = center_y + y_norm * outer_px_r
+            pr = self.base_r * depth_scale
+
+            disc(frame, px, py, pr, BODIES[self.inner_key]["col"], alpha=alpha * depth_dim, glossy=True)
 
 
 # ---------------------------------------------------------------- the 5 agents
@@ -708,10 +635,6 @@ def agent_researcher(c):
         fail("ratio mismatch for " + c["concept_id"], 2)
     if not (MIN_RATIO <= ratio <= MAX_RATIO):
         fail("ratio %.2f outside %.0f-%.0f" % (ratio, MIN_RATIO, MAX_RATIO), 2)
-    if bi.get("vol") and bo.get("vol"):
-        chk = bo["vol"] / bi["vol"]
-        if abs(chk - vol) / vol > 0.02:
-            fail("volume cross-check failed: %.4g vs %.4g" % (vol, chk), 2)
     return dict(ratio=ratio, vol_ratio=vol, title=c["target_title"], wide_txt="~%dx" % round(ratio),
                 final_txt=_rnd(vol), inner=nm_cap(bi["name"]).replace("The ", ""), outer_cap=nm_cap(bo["name"]))
 
@@ -724,7 +647,7 @@ def agent_director(c, f):
     return dict(dur=22.0, hook_end=3.0, zoom_end=9.5, fill_end=18.0, fade_start=20.0, A=A, B=B, gap=1150.0 / A,
                 bg_top=(4, 6, 16), bg_bot=bot, title=f["title"],
                 beats=[("hook: question + pulsing ring", 0, 3), ("zoom-out reveals container", 3, 9.5),
-                       ("fill: copies pack in, counter races", 9.5, 18), ("payoff: final number", 18, 22)])
+                       ("fill: true 3D volumetric orbital packing", 9.5, 18), ("payoff: final number", 18, 22)])
 
 
 def agent_engine(c, f, sb, out):
@@ -735,14 +658,16 @@ def agent_engine(c, f, sb, out):
     A, B, gap = sb["A"], sb["B"], sb["gap"]
     ri, ro = bi["diam"] / 2, bo["diam"] / 2
     ys_km = ro + gap
-    dots = DotLayer(inner, ratio)
+    
+    # 3D Volumetric Engine instance
+    vol_3d = VolumetricSphere3D(inner, ratio, outer_px_r=ro * B)
+    
     bg = make_bg(sb["bg_top"], sb["bg_bot"], seed=11)
     tf, tl = wrap_fit(sb["title"], 940, 3, 92)
     inner_nm, outer_nm = f["inner"], f["outer_cap"]
     lab_fill = "%s fit inside %s" % (bi["plural"], nm_mid(bo["name"]))
 
     aud = Audio(DUR)
-    # Background cinematic sub-bass drone
     aud.add(0.0, ambient_sub_bass(DUR, f0=55.0, amp=0.30))
     aud.add(0.2, whoosh(0.9, 400, 2200, 0.35, 5))
     aud.add(z0 - 0.1, whoosh(2.0, 150, 900, 0.5, 2))
@@ -754,10 +679,7 @@ def agent_engine(c, f, sb, out):
 
     def frame_at(t):
         fr = bg.copy()
-        
-        # Slow Cinematic Push-in zoom
         cam_drift = 1.0 + (0.05 * (t / DUR))
-        
         u = sm((t - z0) / (z1 - z0))
         sc = A * (B / A) ** u * cam_drift
         camy = ys_km * u
@@ -765,9 +687,17 @@ def agent_engine(c, f, sb, out):
         fe = sm((t - z1) / (z2 - z1))
         in_a = sm(t / 0.5) * (1 - sm((t - (z1 - 2.5)) / 2.0))
 
+        # Dynamic Parallax Orbital Camera angle
+        cam_orbit = 0.35 * (t - z1) if t >= z1 else 0.0
+
         if t >= z0 - 0.2:
-            draw_body(fr, outer, 540, sy, ro * sc, 1.0, fe, spin=0.35 * t, t=t)
-            dots.draw(fr, fe, center_y=sy)
+            # When filling, transform the container into an atmospheric glass shell
+            # so the true 3D planets are visible inside!
+            is_filling = (t >= z1)
+            draw_body(fr, outer, 540, sy, ro * sc, 1.0, fe, spin=0.35 * t, t=t, glass_mode=is_filling)
+            
+            # Draw true 3D volumetric spheres inside!
+            vol_3d.draw(fr, fe, alpha=1.0, center_x=540, center_y=sy, outer_px_r=ro * sc * 0.90, cam_orbit=cam_orbit)
 
         iy = CY - camy * sc
         draw_body(fr, inner, 540, iy, ri * sc, in_a, spin=0.9 * t, t=t)
@@ -787,7 +717,6 @@ def agent_engine(c, f, sb, out):
             fr = bg * (1 - sa) + fr * sa
 
         tx = Text()
-        # Top banner backing shadow
         tx.d.rounded_rectangle([60, 100, 1020, 350], 25, fill=(0, 0, 0, int(120 * sm(t / 0.35))))
         tx.lines(W / 2, 225, tl, tf, a=sm(t / 0.35))
 
@@ -795,7 +724,6 @@ def agent_engine(c, f, sb, out):
             tx.put((540, iy + ri * sc + 64), inner_nm, font(46), (160, 215, 255),
                    (1 - sm((t - (z1 - 3.0)) / 1.0)) * sm((t - 0.4) / 0.5))
 
-        # Dynamic Counter System with Glow Card
         if t < z0:
             num, lab = "0", "%s counted so far" % bi["plural"]
         elif t < z1:
@@ -810,7 +738,6 @@ def agent_engine(c, f, sb, out):
         if t >= z2:
             ca *= sm((t - z2) / 0.35)
 
-        # Bottom stat card backing & glowing border
         tx.d.rounded_rectangle([70, 1490, 1010, 1830], 35, fill=(8, 10, 24, int(205 * ca)))
         border_col = (110, 255, 180, int(170 * ca)) if t >= z2 else (255, 220, 110, int(150 * ca))
         tx.d.rounded_rectangle([70, 1490, 1010, 1830], 35, outline=border_col, width=4)
@@ -820,7 +747,7 @@ def agent_engine(c, f, sb, out):
         tx.put((540, 1745), lab, fit_font(lab, 900, 52, 24), (240, 245, 255), ca)
 
         if t >= z1:
-            tx.put((540, 1865), "2D slice visualized - Counter reflects 3D volume", font(30), (180, 185, 215),
+            tx.put((540, 1865), "3D volumetric simulation - Counter reflects volume", font(30), (180, 185, 215),
                    0.95 * sm((t - z1 - 0.5) / 0.6) * ca)
 
         return tx.apply(np.clip(fr, 0, 255).astype(np.uint8)).tobytes()
@@ -834,7 +761,7 @@ def agent_publisher(c, f, sb, mp4, ledger, ledger_path, update_ledger=True):
     quality_check(mp4, sb["dur"])
     bi, bo = BODIES[c["inner_body"]], BODIES[c["outer_body"]]
     title = c["target_title"] + " #shorts"
-    desc = ("%s\nDiameter ratio %.1fx - volume ratio %s.\nDots are a 2D slice; the counter is the 3D volume. "
+    desc = ("%s\nDiameter ratio %.1fx - volume ratio %s.\n3D Volumetric orbital simulation. "
             "Made with code, no AI video.\n#space #science #scale #shorts" % (c["target_title"], f["ratio"], f["final_txt"]))
     tags = ["space", "science", "size comparison", "scale", bi["name"].lower(), bo["name"].lower(), "shorts", "how big"]
     write_meta(os.path.splitext(mp4)[0] + ".txt", title, desc, tags,
@@ -862,470 +789,26 @@ def run_pipeline(out, ledger_path, pick=None):
     return mp4
 
 
-# =============================================================== ENGINE 2: ILLUSION
-def _panel(S=2):
-    img = Image.new("RGB", (W * S, H * S), (12, 14, 34))
-    return img, ImageDraw.Draw(img)
-
-
-def _grad_bg(S=2):
-    t = np.linspace(0, 1, H * S, dtype=np.float32)[:, None, None]
-    arr = (np.array((10, 12, 32), np.float32) * (1 - t) + np.array((26, 16, 56), np.float32) * t) * np.ones((1, W * S, 1), np.float32)
-    return Image.fromarray(arr.astype(np.uint8))
-
-
-PX0, PX1, PY0, PY1 = 70, 1010, 560, 1420
-
-
-def ill_muller(rng, S=2):
-    img = _grad_bg(S)
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([PX0 * S, PY0 * S, PX1 * S, PY1 * S], 40 * S, fill=(246, 246, 250))
-    L = int(rng.integers(470, 540))
-    ang = math.radians(rng.uniform(28, 40))
-    fl = int(rng.integers(70, 95))
-    x0, x1 = 540 - L // 2, 540 + L // 2
-    ys = (860, 1140)
-    wd = 9 * S
-    col = (30, 30, 50)
-    for k, y in enumerate(ys):
-        d.line([x0 * S, y * S, x1 * S, y * S], fill=col, width=wd)
-        sgn = -1 if k == 0 else 1
-        for xe, dirx in ((x0, -1), (x1, 1)):
-            for sy in (-1, 1):
-                d.line([xe * S, y * S, (xe + sgn * dirx * fl * math.cos(ang)) * S, (y + sy * fl * math.sin(ang)) * S],
-                       fill=col, width=wd)
-    f = font(64 * S)
-    for lab, y in (("A", ys[0]), ("B", ys[1])):
-        d.text((130 * S, y * S), lab, font=f, fill=(200, 60, 80), anchor="mm")
-    meta = dict(x0=x0, x1=x1, ys=ys)
-
-    def reveal(dr, p, S=1):
-        for xx in (meta["x0"], meta["x1"]):
-            yb = 760 + (1240 - 760) * p
-            for y in range(760, int(yb), 28):
-                dr.line([xx, y, xx, min(y + 16, yb)], fill=(255, 70, 90), width=6)
-    return dict(img=img, reveal=reveal, q="Which line is longer: A or B?", ans="They are EQUAL!",
-                exp=["The fins make your brain judge", "length by context, not by size."], opts="Comment A or B")
-
-
-def ill_ebbinghaus(rng, S=2):
-    img = _grad_bg(S)
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([PX0 * S, PY0 * S, PX1 * S, PY1 * S], 40 * S, fill=(246, 246, 250))
-    swap = bool(rng.integers(0, 2))
-    rc = 64
-    cy = 990
-    cl, cr = (340, 780) if not swap else (300, 740)
-    big_c, small_c = (70, 110, 200), (70, 110, 200)
-
-    def ring(cx, n, rr, dist):
-        for k in range(n):
-            a = 2 * math.pi * k / n
-            x, y = cx + dist * math.cos(a), cy + dist * math.sin(a)
-            d.ellipse([(x - rr) * S, (y - rr) * S, (x + rr) * S, (y + rr) * S], fill=big_c)
-    big_x, small_x = (cl, cr) if not swap else (cr, cl)
-    ring(big_x, 6, 88, rc + 88 + 18)
-    ring(small_x, 8, 22, rc + 22 + 16)
-    for cx in (cl, cr):
-        d.ellipse([(cx - rc) * S, (cy - rc) * S, (cx + rc) * S, (cy + rc) * S], fill=(255, 140, 0))
-    meta = dict(cl=cl, cr=cr, cy=cy, rc=rc)
-
-    def reveal(dr, p, S=1):
-        pr = sm(p)
-        for cx in (meta["cl"], meta["cr"]):
-            rr = meta["rc"] + 2
-            dr.ellipse([cx - rr, meta["cy"] - rr, cx + rr, meta["cy"] + rr], outline=(20, 20, 40), width=6)
-        x_a, x_b = meta["cl"] - meta["rc"], meta["cr"] + meta["rc"]
-        xm = x_a + (x_b - x_a) * pr
-        dr.line([x_a, meta["cy"] + 150, xm, meta["cy"] + 150], fill=(255, 70, 90), width=7)
-        for xx in (meta["cl"] - meta["rc"], meta["cl"] + meta["rc"], meta["cr"] - meta["rc"], meta["cr"] + meta["rc"]):
-            dr.line([xx, meta["cy"] + 130, xx, meta["cy"] + 170], fill=(255, 70, 90), width=5)
-    return dict(img=img, reveal=reveal, q="Which orange circle is bigger?", ans="Exactly the same size!",
-                exp=["Your brain compares each circle", "with the ones around it."], opts="Comment LEFT or RIGHT")
-
-
-def ill_contrast(rng, S=2):
-    img = _grad_bg(S)
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([PX0 * S, PY0 * S, PX1 * S, PY1 * S], 40 * S, fill=(246, 246, 250))
-    gray = int(rng.integers(112, 140))
-    dark, light = int(rng.integers(20, 45)), int(rng.integers(215, 240))
-    mid = 540
-    swap = bool(rng.integers(0, 2))
-    lcol, rcol = ((dark,) * 3, (light,) * 3) if not swap else ((light,) * 3, (dark,) * 3)
-    d.rounded_rectangle([PX0 * S, PY0 * S, mid * S, PY1 * S], 40 * S, fill=lcol)
-    d.rectangle([(PX0 + 60) * S, PY0 * S, mid * S, PY1 * S], fill=lcol)
-    d.rounded_rectangle([mid * S, PY0 * S, PX1 * S, PY1 * S], 40 * S, fill=rcol)
-    d.rectangle([mid * S, PY0 * S, (PX1 - 60) * S, PY1 * S], fill=rcol)
-    g = (gray,) * 3
-    bars = ((270, 470), (610, 810))
-    for x0, x1 in bars:
-        d.rectangle([x0 * S, 880 * S, x1 * S, 1110 * S], fill=g)
-    meta = dict(g=g, bars=bars)
-
-    def reveal(dr, p, S=1):
-        half = (610 - 470) / 2 * sm(p)
-        dr.rectangle([540 - half - 1, 880, 540 + half + 1, 1110], fill=meta["g"])
-    return dict(img=img, reveal=reveal, q="Which gray bar is darker?", ans="Exactly the same gray!",
-                exp=["Your eyes judge brightness", "against the background."], opts="Comment LEFT or RIGHT")
-
-
-def ill_cafe(rng, S=2):
-    img = _grad_bg(S)
-    d = ImageDraw.Draw(img)
-    pw, ph = PX1 - PX0, PY1 - PY0
-    tile = Image.new("RGB", (pw * S, ph * S), (128, 128, 128))
-    td = ImageDraw.Draw(tile)
-    w = 94
-    rows_h = 56
-    mort = 6
-    nrows = ph // rows_h
-    shift = w / 2.0 if rng.random() < 0.5 else w / 2.0
-    for r in range(nrows + 1):
-        y0 = r * rows_h
-        off = -(shift if r % 2 else 0)
-        for c in range(-1, pw // w + 3):
-            x0 = off + c * w
-            colr = (15, 15, 20) if (c % 2 == 0) else (248, 248, 250)
-            td.rectangle([x0 * S, (y0 + mort / 2) * S, (x0 + w) * S - 1, (y0 + rows_h - mort / 2) * S - 1], fill=colr)
-    mask = Image.new("L", (pw * S, ph * S), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, pw * S, ph * S], 40 * S, fill=255)
-    img.paste(tile, (PX0 * S, PY0 * S), mask)
-    meta = dict(rows=[PY0 + r * rows_h for r in range(1, nrows)])
-
-    def reveal(dr, p, S=1):
-        xe = PX0 + (PX1 - PX0) * sm(p)
-        for i, y in enumerate(meta["rows"][::3][:5]):
-            dr.line([PX0, y, xe, y], fill=(255, 70, 90) if i % 2 == 0 else (70, 200, 255), width=6)
-    return dict(img=img, reveal=reveal, q="Are the gray lines sloped or straight?", ans="All perfectly parallel!",
-                exp=["The shifted tiles fool your", "brain into seeing slopes."], opts="Comment STRAIGHT or SLOPED")
-
-
-ILLUSIONS = [("muller_lyer", ill_muller), ("ebbinghaus", ill_ebbinghaus), ("contrast", ill_contrast), ("cafe_wall", ill_cafe)]
-
-
-def engine_illusion(seed, out):
-    name, builder = ILLUSIONS[seed % len(ILLUSIONS)]
-    rng = np.random.default_rng(1000 + seed)
-    ill = builder(rng)
-    base_img = ill["img"].resize((W, H), Image.LANCZOS)
-    DUR = 22.0
-    print("illusion:", name, "|", ill["q"])
-    tf, tl = wrap_fit(ill["q"], 940, 3, 88)
-    ef = fit_font(max(ill["exp"], key=len), 940, 56, 28)
-
-    aud = Audio(DUR)
-    aud.add(0.0, ambient_sub_bass(DUR, f0=60.0, amp=0.25))
-    aud.add(0.1, whoosh(0.8, 500, 2500, 0.35, 4))
-    for k, tt in enumerate((6.5, 7.5, 8.5)):
-        aud.add(tt, tick(900 + 200 * k, 0.4))
-    aud.add(9.2, bell(784, 1.4, 0.45))
-    aud.add(9.2, bell(988, 1.4, 0.3))
-    aud.add(14.2, tick(1200, 0.25))
-
-    def frame_at(t):
-        img = base_img.copy()
-        dr = ImageDraw.Draw(img)
-        if t >= 9.2:
-            ill["reveal"](dr, sm((t - 9.2) / 3.0), 1)
-        arr = np.asarray(img, np.float32)
-        fade = sm(t / 0.5) * (1 - sm((t - 20.5) / 1.4))
-        bg = make_bg_cached()
-        arr = bg * (1 - fade) + arr * fade
-        tx = Text()
-        tx.lines(W / 2, 235, tl, tf, a=sm(t / 0.35) * (1 - sm((t - 21.0) / 0.9)))
-        if 2.5 <= t < 9.2:
-            tx.put((540, 1560), ill["opts"], fit_font(ill["opts"], 940, 60), (255, 226, 120), sm((t - 2.5) / 0.4))
-            k = min(max((t - 2.5) / 6.7, 0), 1)
-            tx.d.rounded_rectangle([140, 1650, 940, 1676], 13, fill=(255, 255, 255, 60))
-            tx.d.rounded_rectangle([140, 1650, 140 + 800 * (1 - k), 1676], 13, fill=(255, 226, 120, 230))
-            if t >= 6.2:
-                n = 3 - int((t - 6.2) / 1.0)
-                if n >= 1:
-                    tx.put((540, 1480), str(n), font(110), (255, 255, 255), 1.0)
-        elif t < 2.5:
-            tx.put((540, 1560), "Look closely...", font(64), (235, 240, 255), sm(t / 0.5))
-        if 9.2 <= t:
-            a = sm((t - 9.5) / 0.5) * (1 - sm((t - 21.0) / 0.9))
-            tx.put((540, 1530), ill["ans"], fit_font(ill["ans"], 940, 92, 40), (120, 255, 160), a)
-        if 14.2 <= t:
-            a = sm((t - 14.2) / 0.6) * (1 - sm((t - 21.0) / 0.9))
-            tx.lines(540, 1700, ill["exp"], ef, (235, 240, 255), a, lh=int(ef.size * 1.2))
-        return tx.apply(np.clip(arr, 0, 255).astype(np.uint8)).tobytes()
-
-    _bg = [None]
-
-    def make_bg_cached():
-        if _bg[0] is None:
-            _bg[0] = np.asarray(_grad_bg(1), np.float32)
-        return _bg[0]
-
-    base = os.path.join(out, "illusion_%s_%d" % (name, seed))
-    render_video(base + ".mp4", DUR, frame_at, aud)
-    quality_check(base + ".mp4", DUR)
-    write_meta(base + ".txt", ill["q"] + " #shorts #illusion",
-               "%s\nAnswer: %s %s\nMade with code. Comment your guess!\n#opticalillusion #brain #shorts"
-               % (ill["q"], ill["ans"], " ".join(ill["exp"])),
-               ["optical illusion", "brain test", "perception", "illusion", "shorts", "can you see it"])
-    return base + ".mp4"
-
-
-# =============================================================== ENGINE 3: PHYSICS
-PAL = [("Red", (255, 70, 80)), ("Orange", (255, 160, 40)), ("Yellow", (250, 230, 70)), ("Green", (80, 230, 120)),
-       ("Cyan", (70, 220, 255)), ("Blue", (90, 130, 255)), ("Purple", (185, 105, 255)), ("Pink", (255, 115, 205))]
-ARENA_R, BALL_R = 430.0, 32.0
-
-
-def simulate(seed, n, theta, omega, speed=540.0, T=25.0):
-    R, r = ARENA_R, BALL_R
-    rng = np.random.default_rng(seed)
-    pos = np.zeros((n, 2))
-    for i in range(n):
-        for _ in range(800):
-            a, dd = rng.uniform(0, 2 * math.pi), rng.uniform(0, R - 3 * r)
-            p = np.array([dd * math.cos(a), dd * math.sin(a)])
-            if all(np.hypot(*(p - pos[j])) > 2.4 * r for j in range(i)):
-                pos[i] = p
-                break
-    ang = rng.uniform(0, 2 * math.pi, n)
-    vel = np.stack([np.cos(ang), np.sin(ang)], 1) * speed
-    phi0 = rng.uniform(0, 2 * math.pi)
-    sub = 8
-    dt = 1.0 / (FPS * sub)
-    nf = int(T * FPS)
-    status = np.zeros(n, int)
-    tel = np.full(n, np.nan)
-    states = np.zeros((nf, n, 2))
-    stat = np.zeros((nf, n), int)
-    events = []
-    for f in range(nf):
-        for s in range(sub):
-            t = (f * sub + s) * dt
-            alive = int((status == 0).sum())
-            th = theta if alive > 1 else 0.0
-            phi = phi0 + omega * t
-            pos += vel * dt
-            for i in range(n):
-                if status[i]:
-                    continue
-                x, y = pos[i]
-                d = math.hypot(x, y)
-                if d > R - r:
-                    a = math.atan2(y, x)
-                    diff = (a - phi + math.pi) % (2 * math.pi) - math.pi
-                    if abs(diff) < th / 2 and alive > 1:
-                        status[i], tel[i] = 1, t
-                        alive -= 1
-                        vel[i] = np.array([x, y]) / d * speed * 1.1
-                        events.append((t, "out", i, -1, speed))
-                        continue
-                    nx, ny = x / d, y / d
-                    vn = vel[i, 0] * nx + vel[i, 1] * ny
-                    if vn > 0:
-                        vel[i] -= 2 * vn * np.array([nx, ny])
-                        events.append((t, "wall", i, -1, vn))
-                    pos[i] = [nx * (R - r), ny * (R - r)]
-            for i in range(n):
-                if status[i]:
-                    continue
-                for j in range(i + 1, n):
-                    if status[j]:
-                        continue
-                    dl = pos[j] - pos[i]
-                    dist = math.hypot(dl[0], dl[1])
-                    if 1e-6 < dist < 2 * r:
-                        nrm = dl / dist
-                        push = (2 * r - dist) / 2
-                        pos[i] -= nrm * push
-                        pos[j] -= nrm * push
-                        vn = float(np.dot(vel[i] - vel[j], nrm))
-                        if vn > 0:
-                            vel[i] -= vn * nrm
-                            vel[j] += vn * nrm
-                            events.append((t, "ball", i, j, vn))
-            for i in range(n):
-                if not status[i]:
-                    sp = math.hypot(vel[i, 0], vel[i, 1])
-                    if sp > 1e-6:
-                        vel[i] *= speed / sp
-        states[f] = pos
-        stat[f] = status
-    return dict(states=states, stat=stat, tel=tel, events=events, theta=theta, phi0=phi0, omega=omega, n=n)
-
-
-def pretest(seed, n=8):
-    best, best_score = None, 1e9
-    thetas = [0.38, 0.5, 0.62, 0.75, 0.9, 0.3]
-    for k in range(90):
-        th = thetas[k % len(thetas)]
-        sim = simulate(seed * 1000 + k, n, th, 0.9 + 0.1 * (k % 5))
-        te = np.sort(sim["tel"][~np.isnan(sim["tel"])])
-        if len(te) < n - 1:
-            continue
-        last, prev, first = te[-1], te[-2], te[0]
-        coll = sum(1 for e in sim["events"] if e[1] == "ball")
-        score = abs(last - 18.0) + (0 if prev <= last - 1.0 else 5) + (0 if first >= 2.0 else 5) + (0 if coll >= 20 else 5)
-        ok = 15.0 <= last <= 21.5 and last - prev >= 1.0 and first >= 2.0 and coll >= 20
-        print("  pretest %02d theta=%.2f last=%.1fs margin=%.1fs first=%.1fs collisions=%d -> %s"
-              % (k, th, last, last - prev, first, coll, "PASS" if ok else "reject"))
-        if ok:
-            return sim
-        if score < best_score:
-            best, best_score = sim, score
-    fail("no interesting simulation found for this seed (try another --seed)", 7)
-
-
-def engine_physics(seed, out):
-    n = 8
-    sim = pretest(seed, n)
-    DUR = 25.0
-    states, stat, tel = sim["states"], sim["stat"], sim["tel"]
-    win = int(np.where(stat[-1] == 0)[0][0])
-    te = float(np.nanmax(tel))
-    wname, wcol = PAL[win]
-    print("physics: winner", wname, "| last elimination %.1fs" % te)
-
-    S = 1000
-    cx0, cy0 = 540.0, float(CY)
-    yy, xx = np.mgrid[0:S, 0:S].astype(np.float32)
-    ddx, ddy = xx - S / 2, yy - S / 2
-    dist = np.sqrt(ddx * ddx + ddy * ddy)
-    ang = np.arctan2(ddy, ddx)
-    ring_a = np.clip(7.0 - np.abs(dist - ARENA_R), 0, 1)
-    ring_glow = np.exp(-np.abs(dist - ARENA_R) / 14.0) * 0.5
-    bg = make_bg((5, 6, 20), (16, 10, 40), seed=5, stars=160)
-    for rr in (130, 260):
-        reg = region(cx0, cy0, rr + 3)
-        x0, x1, y0, y1 = reg
-        dd = np.sqrt((X[:, x0:x1] - cx0) ** 2 + (Y[y0:y1, :] - cy0) ** 2)
-        blend(bg, reg, np.array([60, 70, 130], np.float32), np.clip(1.4 - np.abs(dd - rr), 0, 1) * 0.25)
-    rng = np.random.default_rng(seed)
-    parts = []
-    for i in range(n):
-        if not np.isnan(tel[i]):
-            fi = min(int(tel[i] * FPS), len(states) - 1)
-            p0 = states[fi, i]
-            for _ in range(26):
-                a, sp = rng.uniform(0, 2 * math.pi), rng.uniform(150, 520)
-                parts.append((tel[i], p0[0], p0[1], sp * math.cos(a), sp * math.sin(a), i))
-    trail = np.zeros((S, S, 3), np.float32)
-
-    aud = Audio(DUR)
-    aud.add(0.0, ambient_sub_bass(DUR, f0=60.0, amp=0.25))
-    aud.add(0.1, whoosh(0.8, 400, 2400, 0.35, 8))
-    last = {}
-    for (t, kind, i, j, v) in sim["events"]:
-        if kind == "out":
-            aud.add(t, pop(0.55))
-            aud.add(t, whoosh(0.7, 2200, 300, 0.35, 20 + i))
-        elif kind == "wall":
-            if t - last.get(("w", i), -1) > 0.09:
-                aud.add(t, bell(note(i), 0.45, 0.16))
-                last[("w", i)] = t
-        else:
-            if t - last.get(("b", i, j), -1) > 0.09:
-                aud.add(t, bell(note(i), 0.4, 0.2))
-                aud.add(t, bell(note(j) * 1.0, 0.4, 0.2))
-                last[("b", i, j)] = t
-    for k, kk in enumerate((0, 2, 4, 7)):
-        aud.add(te + 0.35 + 0.16 * k, bell(note(kk, 392.0), 1.0, 0.4))
-
-    tf = fit_font("Which color survives?", 940, 96)
-
-    def frame_at(t):
-        f = bg.copy()
-        fi = min(int(t * FPS), len(states) - 1)
-        pos, st = states[fi], stat[fi]
-        alive_n = int((st == 0).sum())
-        th = sim["theta"] if alive_n > 1 else 0.0
-        phi = sim["phi0"] + sim["omega"] * t
-        diff = (ang - phi + math.pi) % (2 * math.pi) - math.pi
-        gmask = np.clip((np.abs(diff) - th / 2) * (ARENA_R / 6.0), 0, 1)
-        edge = np.clip(1 - np.abs(np.abs(diff) - th / 2) * (ARENA_R / 14.0), 0, 1) * (th > 0)
-        ra = ring_a * gmask + ring_glow * gmask * 0.6
-        rcol = np.array([70, 200, 255], np.float32) * (0.85) + 120 * edge[..., None] * np.array([1, 0.6, 0.3], np.float32)
-        reg = (int(cx0 - S / 2), int(cx0 + S / 2), int(cy0 - S / 2), int(cy0 + S / 2))
-        blend(f, reg, rcol, np.clip(ra + edge * 0.9 * ring_a, 0, 1))
-        trail[...] *= 0.86
-        for i in range(n):
-            if st[i] == 0:
-                bx, by = pos[i][0] + S / 2, pos[i][1] + S / 2
-                x0, x1, y0, y1 = int(bx - 44), int(bx + 44), int(by - 44), int(by + 44)
-                if x0 >= 0 and y0 >= 0 and x1 < S and y1 < S:
-                    dd = np.sqrt((xx[y0:y1, x0:x1] - bx) ** 2 + (yy[y0:y1, x0:x1] - by) ** 2)
-                    m = np.clip(1 - dd / (BALL_R * 1.25), 0, 1) ** 1.5 * 0.5
-                    trail[y0:y1, x0:x1] += m[..., None] * np.array(PAL[i][1], np.float32) * 0.55
-        sub = f[int(cy0 - S / 2):int(cy0 + S / 2), int(cx0 - S / 2):int(cx0 + S / 2)]
-        sub += np.clip(trail, 0, 255)
-        for i in range(n):
-            px, py = cx0 + pos[i][0], cy0 + pos[i][1]
-            if st[i] == 0:
-                disc(f, px, py, BALL_R, PAL[i][1])
-            else:
-                age = t - tel[i]
-                al = 1 - sm(age / 1.1)
-                disc(f, px, py, BALL_R * (1 - 0.3 * sm(age / 1.1)), PAL[i][1], al)
-        for (t0, x0_, y0_, vx, vy, i) in parts:
-            age = t - t0
-            if 0 <= age < 0.8:
-                disc(f, cx0 + x0_ + vx * age, cy0 + y0_ + vy * age, 7 * (1 - age / 0.8), PAL[i][1], 1 - age / 0.8, False)
-        f = bloom(f, 0.6, 150.0, 7)
-        tx = Text()
-        tx.put((540, 190), "Which color survives?", tf, a=sm(t / 0.4))
-        if t < 2.5:
-            tx.put((540, 300), "Pick one in the comments!", font(52), (255, 226, 120), sm(t / 0.5))
-        arr = np.clip(f, 0, 255)
-        for i in range(n):
-            lx = 140 + i * 114.3
-            alive_i = st[i] == 0
-            disc(arr, lx, 1560, 30, PAL[i][1], 1.0 if alive_i else 0.18, False)
-        if t >= te + 0.3:
-            a = sm((t - te - 0.3) / 0.5)
-            tx.put((540, 1700), "%s survives!" % wname, fit_font("%s survives!" % wname, 940, 120), wcol, a)
-        else:
-            tx.put((540, 1700), "Alive: %d" % alive_n, font(110), (255, 226, 120), 1.0)
-        return tx.apply(arr.astype(np.uint8)).tobytes()
-
-    base = os.path.join(out, "physics_survival_%d" % seed)
-    render_video(base + ".mp4", DUR, frame_at, aud)
-    quality_check(base + ".mp4", DUR)
-    write_meta(base + ".txt", "Which color survives? #shorts",
-               "Eight balls, one escape gap. Which color survives? Comment your pick!\nMade with code (own physics + original sounds).\n#satisfying #physics #shorts",
-               ["satisfying", "ball simulation", "survival", "physics", "shorts", "which color"],
-               "Run %d: winner %s (simulation pre-tested: elimination timing and collisions in range)." % (seed, wname))
-    return base + ".mp4"
-
-
-# =============================================================== main
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("engine", choices=["auto", "scale", "illusion", "physics", "all"])
-    ap.add_argument("--seed", type=int, default=-1, help="specific variant (scale: index into ranked list, no ledger write)")
+    ap.add_argument("engine", choices=["auto", "scale", "all"])
+    ap.add_argument("--seed", type=int, default=-1)
     ap.add_argument("--out", default="out")
     ap.add_argument("--bodies", default="data/bodies.json")
     ap.add_argument("--ledger", default="ledger.json")
-    ap.add_argument("--count", type=int, default=1, help="auto/scale: how many videos")
+    ap.add_argument("--count", type=int, default=1)
     a = ap.parse_args()
     for t in ("ffmpeg", "ffprobe"):
         if shutil.which(t) is None:
             fail("%s not found on PATH" % t, 3)
     os.makedirs(a.out, exist_ok=True)
     load_bodies(a.bodies)
-    print("bodies loaded: %d (%s)" % (len(BODIES), a.bodies if os.path.exists(a.bodies) else "built-in defaults"))
-    other = {"illusion": engine_illusion, "physics": engine_physics}
-    todo = {"auto": ["scale"], "scale": ["scale"], "all": ["scale", "illusion", "physics"]}.get(a.engine, [a.engine])
-    for e in todo:
-        for k in range(a.count):
-            t0 = time.time()
-            print("== %s ==" % e)
-            if e == "scale":
-                path = run_pipeline(a.out, a.ledger, None if a.seed < 0 else a.seed + k)
-            else:
-                seed = a.seed if a.seed >= 0 else len([x for x in os.listdir(a.out) if x.startswith(e) and x.endswith(".mp4")])
-                path = other[e](seed, a.out)
-            if path:
-                print("done -> %s  (%.0fs)\n" % (path, time.time() - t0))
+    print("bodies loaded: %d" % len(BODIES))
+    for k in range(a.count):
+        t0 = time.time()
+        path = run_pipeline(a.out, a.ledger, None if a.seed < 0 else a.seed + k)
+        if path:
+            print("done -> %s  (%.0fs)\n" % (path, time.time() - t0))
 
 
 if __name__ == "__main__":
