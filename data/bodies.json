@@ -1,1 +1,117 @@
-
+{
+  "_note": "Required per body: name, diam_km, color_hex. Optional: plural, type (rock|gas|ice|earth|star), familiarity (1-5), col2, bands, vol_km3. Verify diameters against a primary source.",
+  "bodies": {
+    "ceres": {
+      "name": "Ceres",
+      "plural": "Ceres-sized worlds",
+      "diam_km": 939.4,
+      "color_hex": "#8C8680",
+      "type": "rock",
+      "familiarity": 2
+    },
+    "moon": {
+      "name": "The Moon",
+      "plural": "Moons",
+      "diam_km": 3474.8,
+      "color_hex": "#B0B0AC",
+      "type": "rock",
+      "familiarity": 5
+    },
+    "mercury": {
+      "name": "Mercury",
+      "plural": "Mercuries",
+      "diam_km": 4879.4,
+      "color_hex": "#A08E7E",
+      "type": "rock",
+      "familiarity": 3
+    },
+    "mars": {
+      "name": "Mars",
+      "plural": "Mars-sized worlds",
+      "diam_km": 6779.0,
+      "color_hex": "#C4623E",
+      "type": "rock",
+      "familiarity": 4
+    },
+    "earth": {
+      "name": "Earth",
+      "plural": "Earths",
+      "diam_km": 12742.0,
+      "color_hex": "#2364D7",
+      "type": "earth",
+      "familiarity": 5
+    },
+    "neptune": {
+      "name": "Neptune",
+      "plural": "Neptunes",
+      "diam_km": 49244.0,
+      "color_hex": "#3C64D7",
+      "type": "gas",
+      "familiarity": 3
+    },
+    "saturn": {
+      "name": "Saturn",
+      "plural": "Saturns",
+      "diam_km": 116460.0,
+      "color_hex": "#CEB078",
+      "type": "gas",
+      "familiarity": 5
+    },
+    "jupiter": {
+      "name": "Jupiter",
+      "plural": "Jupiters",
+      "diam_km": 139820.0,
+      "color_hex": "#B0764E",
+      "type": "gas",
+      "familiarity": 5
+    },
+    "sun": {
+      "name": "The Sun",
+      "plural": "Suns",
+      "diam_km": 1392700.0,
+      "color_hex": "#FFBD3C",
+      "type": "star",
+      "familiarity": 5
+    },
+    "sirius_a": {
+      "name": "Sirius A",
+      "plural": "Sirius-sized stars",
+      "diam_km": 2380000.0,
+      "color_hex": "#A0C4FF",
+      "type": "star",
+      "familiarity": 3
+    },
+    "pollux": {
+      "name": "Pollux",
+      "plural": "Pollux-sized stars",
+      "diam_km": 12250000.0,
+      "color_hex": "#FF9E00",
+      "type": "star",
+      "familiarity": 2
+    },
+    "arcturus": {
+      "name": "Arcturus",
+      "plural": "Arcturus-sized stars",
+      "diam_km": 35300000.0,
+      "color_hex": "#FF7B00",
+      "type": "star",
+      "familiarity": 2
+    },
+    "betelgeuse": {
+      "name": "Betelgeuse",
+      "plural": "Betelgeuses",
+      "diam_km": 1060000000.0,
+      "color_hex": "#E63946",
+      "type": "star",
+      "familiarity": 4
+    },
+    "stephenson_2_18": {
+      "name": "Stephenson 2-18",
+      "plural": "Stephenson 2-18s",
+      "diam_km": 2980000000.0,
+      "color_hex": "#D90429",
+      "type": "star",
+      "familiarity": 1
+    }
+  }
+}
