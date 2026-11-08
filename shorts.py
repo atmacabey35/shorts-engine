@@ -129,14 +129,14 @@ class Text:
         return Image.alpha_composite(base, self.img).convert("RGB")
 
 
-# =============================================================== background / glow / stars
-def make_bg(top, bot, seed=7, stars=380, vignette=0.60):
+# =============================================================== background & visual fx
+def make_bg(top, bot, seed=7, stars=400, vignette=0.65):
     rng = np.random.default_rng(seed)
     t = np.linspace(0, 1, H, dtype=np.float32)[:, None, None]
     bg = (np.array(top, np.float32) * (1 - t) + np.array(bot, np.float32) * t) * np.ones((1, W, 1), np.float32)
     for _ in range(stars):
         sx, sy = int(rng.integers(0, W - 2)), int(rng.integers(0, H - 2))
-        v = float(rng.integers(100, 245))
+        v = float(rng.integers(90, 250))
         s = 2 if rng.random() < 0.25 else 1
         bg[sy:sy + s, sx:sx + s, :] = np.maximum(bg[sy:sy + s, sx:sx + s, :], v)
     if vignette:
@@ -147,7 +147,7 @@ def make_bg(top, bot, seed=7, stars=380, vignette=0.60):
     return bg
 
 
-def bloom(frame, strength=0.55, thresh=155.0, radius=8):
+def bloom(frame, strength=0.55, thresh=150.0, radius=8):
     small = Image.fromarray(np.clip(frame, 0, 255).astype(np.uint8)).resize((W // 4, H // 4), Image.BOX)
     arr = np.clip(np.asarray(small, np.float32) - thresh, 0, 255) * (255.0 / (255.0 - thresh))
     g = Image.fromarray(arr.astype(np.uint8)).filter(ImageFilter.GaussianBlur(radius)).resize((W, H), Image.BILINEAR)
@@ -363,7 +363,7 @@ DEFAULT_RAW = {
     "neptune": {"name": "Neptune", "plural": "Neptunes", "diam_km": 49244.0, "color_hex": "#3C64D7"},
     "saturn": {"name": "Saturn", "plural": "Saturns", "diam_km": 116460.0, "color_hex": "#CEB078"},
     "jupiter": {"name": "Jupiter", "plural": "Jupiters", "diam_km": 139820.0, "color_hex": "#B0764E"},
-    "sun": {"name": "The Sun", "plural": "Suns", "diam_km": 1392700.0, "color_hex": "#FFBD3C"},
+    "sun": {"name": "The Sun", "plural": "Suns", "diam_km": 1392700.0, "color_hex": "#FF9D00"},
 }
 BODIES = {}
 MIN_RATIO, MAX_RATIO = 8.0, 120.0
@@ -388,8 +388,8 @@ def normalize_body(key, raw):
     return dict(key=key, name=raw["name"], plural=raw.get("plural", raw["name"] + "s"), diam=d, vol=raw.get("vol_km3"),
                 style=style, col=col, col2=tuple(raw["col2"]) if "col2" in raw else _lighten(col, 0.45),
                 bands=int(raw.get("bands", 8 + int(d) % 9)), spot=bool(raw.get("spot", key == "jupiter")),
-                fam=float(raw.get("familiarity", 3)), core=_lighten(col, 0.65),
-                edge=(int(col[0] * 0.98), int(col[1] * 0.52), int(col[2] * 0.15)))
+                fam=float(raw.get("familiarity", 3)), core=(255, 235, 160) if style == "sun" else _lighten(col, 0.65),
+                edge=(255, 80, 10) if style == "sun" else (int(col[0] * 0.98), int(col[1] * 0.52), int(col[2] * 0.15)))
 
 
 def load_bodies(path):
@@ -486,18 +486,16 @@ def body_rgb(key, dx, dy, r, spin=0.0, t=0.0):
         return out + np.array(b["col2"], np.float32) * rim[..., None] * 0.70
 
     if st == "sun":
-        # Dynamic solar granulation + plasma flares
-        gran = fbm(px, py, pz, 6.5, 4, off=t * 0.45)
-        turb = fbm(px, py, pz, 12.0, 3, off=t * 0.9) * 0.25
-        spots = sstep(0.58, 0.82, fbm(px, py, pz, 1.3, 3, off=2.5))
-        lim = np.clip(1 - 0.52 * (1 - z) ** 1.15, 0.40, 1)
-        core, edge = np.array(b["core"], np.float32), np.array(b["edge"], np.float32)
-        tt = (1 - z) ** 0.82
-        col = core * (1 - tt[..., None]) + edge * tt[..., None]
-        k = (0.95 + 0.12 * (gran + turb)) * (1 - 0.45 * spots) * lim
-        # Corona flare edge
-        corona_flare = np.sin(np.arctan2(v, u) * 16.0 + t * 4.0) * 0.08
-        col = col * (k + corona_flare)[..., None]
+        # Ultra-luminous Star: Golden Plasma core with radiant solar limbs
+        gran = fbm(px, py, pz, 5.0, 4, off=t * 0.4)
+        flare_noise = fbm(px, py, pz, 10.0, 3, off=t * 0.8) * 0.18
+        limb = np.clip((1 - z) ** 1.1, 0, 1)
+        core_col = np.array([255, 240, 175], np.float32)
+        mid_col = np.array([255, 140, 20], np.float32)
+        edge_col = np.array([245, 60, 0], np.float32)
+        col = core_col * (1 - limb[..., None]) + mid_col * limb[..., None]
+        col = col * (0.92 + 0.16 * (gran + flare_noise))[..., None]
+        col += edge_col * ((1 - z) ** 2.5)[..., None] * 0.85
         return col
 
     # Rock (Moon, Mars, etc.)
@@ -541,7 +539,7 @@ def draw_body(frame, key, cx, cy, r, alpha=1.0, darken=0.0, spin=0.0, t=0.0):
         return
     sun = BODIES[key]["style"] == "sun"
     is_saturn = (key == "saturn")
-    ext = r * 2.1 if sun else (r * 2.4 if is_saturn else r * 1.30)
+    ext = r * 2.2 if sun else (r * 2.4 if is_saturn else r * 1.30)
     r = max(r, 2.4)
     reg = region(cx, cy, ext)
     if reg is None:
@@ -552,15 +550,18 @@ def draw_body(frame, key, cx, cy, r, alpha=1.0, darken=0.0, spin=0.0, t=0.0):
     d = np.sqrt(dx * dx + dy * dy)
     inside = np.clip(r - d + 0.5, 0, 1)
 
-    # 1. Multi-layered Atmospheric Corona / Glow
-    glow_col = np.array(BODIES[key]["edge"] if sun else BODIES[key]["col2"], np.float32)
+    # 1. Realistic Organic Solar Corona / Atmospheric Glow
+    glow_col = np.array([255, 120, 25] if sun else BODIES[key]["col2"], np.float32)
     glow_dist = d - r
     if sun:
-        # Pulsing solar corona
+        # High-res organic solar flare plume
+        u_g, v_g = dx / ext, dy / ext
         ang = np.arctan2(dy, dx)
-        ray_mod = 1.0 + 0.18 * np.sin(ang * 24.0 + t * 5.0) + 0.12 * np.cos(ang * 8.0 - t * 2.0)
-        glow_a = np.where(glow_dist > 0, np.exp(-glow_dist / (0.22 * r * ray_mod)), 0.0).astype(np.float32)
-        blend(frame, reg, glow_col, glow_a * 0.95 * alpha * (1.0 - 0.3 * darken))
+        plume = 1.0 + 0.15 * np.sin(ang * 7.0 + t * 2.5) + 0.10 * np.sin(ang * 19.0 - t * 4.0)
+        glow_a = np.where(glow_dist > 0, np.exp(-glow_dist / (0.24 * r * plume)), 0.0).astype(np.float32)
+        blend(frame, reg, glow_col, glow_a * 0.95 * alpha)
+        # Deep outer heat haze
+        blend(frame, reg, np.array([255, 60, 0], np.float32), glow_a * 0.45 * alpha)
     else:
         glow_a = np.where(glow_dist > 0, np.exp(-glow_dist / (0.16 * r)), 0.0).astype(np.float32)
         blend(frame, reg, glow_col, glow_a * 0.65 * alpha * (1.0 - 0.4 * darken))
@@ -582,8 +583,16 @@ def draw_body(frame, key, cx, cy, r, alpha=1.0, darken=0.0, spin=0.0, t=0.0):
     else:
         col = shade(dx, dy)
 
-    if darken > 0:
-        col = col * np.float32(1.0 - 0.45 * darken)
+    # Critical Fix: NEVER turn the Sun into a dirty brown matte board!
+    if sun:
+        # Sun retains its radiant plasma core; when filling with planets,
+        # it transforms into an ethereal luminous container instead of turning brown
+        container_transparency = np.clip(1.0 - 0.72 * darken, 0.28, 1.0)
+        edge_glow = ((1 - np.sqrt(np.clip(1 - (d / r)**2, 0, 1))) ** 1.8) * darken * 1.5
+        col = col * container_transparency + np.array([255, 170, 30], np.float32) * edge_glow[..., None]
+    else:
+        if darken > 0:
+            col = col * np.float32(1.0 - 0.45 * darken)
 
     blend(frame, reg, col, inside * alpha)
 
@@ -1129,11 +1138,11 @@ def simulate(seed, n, theta, omega, speed=540.0, T=25.0):
                         nrm = dl / dist
                         push = (2 * r - dist) / 2
                         pos[i] -= nrm * push
-                        pos[j] += nrm * push
+                        pos[j] -= nrm * push
                         vn = float(np.dot(vel[i] - vel[j], nrm))
                         if vn > 0:
                             vel[i] -= vn * nrm
-                            vel[j] -= vn * nrm
+                            vel[j] += vn * nrm
                             events.append((t, "ball", i, j, vn))
             for i in range(n):
                 if not status[i]:
