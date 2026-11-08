@@ -1,11 +1,7 @@
-name: Render Short
+name: Render Shorts GPU
 
 on:
   workflow_dispatch:
-    inputs:
-      engine:
-        description: "auto (scale pipeline), illusion, physics or all"
-        default: "auto"
 
 permissions:
   contents: write
@@ -13,28 +9,28 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Depoyu Çek
+        uses: actions/checkout@v4
+
+      - name: Python Kur
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: Install
+          python-version: '3.11'
+
+      - name: Modal Kur
+        run: pip install modal
+
+      - name: GPU ile Render Al
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
-          pip install numpy pillow
-      - name: Render
-        run: python shorts.py ${{ github.event.inputs.engine }}
-      - name: Save ledger
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ledger.json
-          git commit -m "ledger update [skip ci]" || echo "no ledger change"
-          git push || echo "push skipped"
-      - uses: actions/upload-artifact@v4
-        if: always()
+          modal run modal_render.py
+
+      - name: Videoyu Telefona Yükle
+        uses: actions/upload-artifact@v4
         with:
-          name: shorts-${{ github.run_number }}
-          path: out/
+          name: shorts-gpu-video
+          path: final_gpu_render.mp4
+          if-no-files-found: error
